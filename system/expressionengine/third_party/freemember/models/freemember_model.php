@@ -107,13 +107,15 @@ class Freemember_model extends CI_Model
         return ee()->db->get()->result_array();
     }
 
-    public function find_member_by_reset_code($reset_code)
+    public function find_member_by_reset_code($reset_code, $ttl = 7200)
     {
         if (empty($reset_code)) return false;
+        if ( !ctype_digit($ttl) ) $ttl = 7200;
+
         return ee()->db->from('reset_password r')
             ->join('members m', 'm.member_id = r.member_id')
             ->where('resetcode', $reset_code)
-            ->where('date > UNIX_TIMESTAMP()-7200')
+            ->where('date > UNIX_TIMESTAMP()-'.$ttl)
             ->get()->row();
     }
 
