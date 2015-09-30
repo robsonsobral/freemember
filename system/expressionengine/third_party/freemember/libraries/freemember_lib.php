@@ -157,6 +157,9 @@ class Freemember_lib
      */
     public function register()
     {
+        // our native honeypot
+        $this->honeypot();
+
         // check for fatal errors
         $this->check_banned();
 
@@ -330,6 +333,22 @@ class Freemember_lib
         $this->mock_output();
         $this->load_member_class('member_auth')->member_logout();
         $this->unmock_output();
+    }
+
+    /**
+     * Native honeypot
+     * because it's good to have
+     * to worry about one less addon
+     */
+    private function honeypot()
+    {
+        if ($honeypot = ee()->config->item('honeypot_field'))
+        {
+            if ( !empty($_POST[$honeypot]) )
+            { echo 'lala';die;
+                return ee()->output->show_user_error('general', array(lang('not_authorized')));
+            }
+        }
     }
 
     /**
