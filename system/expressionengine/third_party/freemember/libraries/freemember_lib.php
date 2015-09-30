@@ -22,6 +22,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+require_once(PATH_THIRD.'freemember/libraries/PhpUserAgent/UserAgentParser.php');
 
 class Freemember_lib
 {
@@ -369,13 +370,21 @@ class Freemember_lib
     protected function _validate_register()
     {
         // automatically set screen_name and username if not submitted
-        // also makes sure these fields are requried by initializing to empty string
+        // also makes sure these fields are required by initializing to empty string
         if ( ! isset($_POST['email'])) $_POST['email'] = '';
         if ( ! isset($_POST['username'])) $_POST['username'] = $_POST['email'];
         if ( ! isset($_POST['screen_name'])) $_POST['screen_name'] = $_POST['username'];
 
         ee()->load->library('fm_form_validation');
         $this->_add_member_validation_rules();
+
+        // rules specific to passwordless registration
+        if ( bool_config_item('allow_passwordless') ){
+            if ( ! isset($_POST['password']) || ! isset($_POST['password_confirm']) )
+            {
+                $_POST['password'] = $_POST['password_confirm'] = $this->_generate_random_password();
+            }
+        }
 
         // rules specific to registration form
         ee()->form_validation->add_rules('password', 'lang:password', 'required');
@@ -579,5 +588,434 @@ class Freemember_lib
     {
         ee()->output =& ee()->old_output;
         unset(ee()->old_output);
+    }
+
+    public function passwordless_form()
+    {
+        // If they are already logged in then send them away.
+        if (ee()->session->userdata('member_id') !== 0)
+        {
+            return array('email' => lang('already_logged'));
+        }
+
+        // check for fatal errors
+        $this->check_banned();
+
+        $errors = array();
+
+        /* -------------------------------------------
+        /* 'member_member_login_start' hook.
+        /*  - Take control of member login routine
+        /*  - Added EE 1.4.2
+        */
+            $edata = ee()->extensions->call('member_member_login_start');
+            if (ee()->extensions->end_script === TRUE) return;
+        /*
+        /* -------------------------------------------*/
+
+        $email = ee()->input->post('email', TRUE);
+
+        if ( !$email )
+        {
+            return array($errors['email'] = lang('no_email'));
+        }
+
+        // form validation
+        ee()->load->library('fm_form_validation');
+        ee()->form_validation->add_rules('email', 'lang:email', 'required|valid_email');
+
+        if (ee()->form_validation->run() === FALSE) {
+            return ee()->form_validation->error_array();
+        }
+
+        ee()->load->library('auth');
+
+        if ( ! ee()->auth->check_require_ip() )
+        {
+            return array('email' => lang('unauthorized_request'));
+        }
+
+        // if $config['passwordless_ttl'] isn't set, the cookie will
+        // last the same time as does the session: 7200s
+        //
+        // Note that ctype_digit(), will return TRUE on an empty string in pre-5.1.0 versions of PHP.
+        $pwls_ttl = ctype_digit(ee()->config->item('passwordless_ttl'))
+                ? ee()->config->item('passwordless_ttl')
+                : ee()->session->user_session_len;
+
+        // Check password lockout status
+        if (true === ee()->session->check_password_lockout($email))
+        {
+            $line = lang('password_lockout_in_effect');
+            $line = str_replace("%d", ee()->config->item('password_lockout_interval'), $line);
+
+            return array('email' => $line);
+        }
+
+        $member = ee()->freemember_model->find_member_by_email($email);
+
+        // do not inform the user if the e-mail is registered or not
+        if ( !empty($member) )
+        {
+
+            // let's use the password reset code for this
+            // clean old password reset codes
+            ee()->freemember_model->clean_password_reset_codes($member->member_id);
+
+            $email_vars = array();
+            $email_message = '';
+
+            // check if the user is member of group which can access the CP
+            // if so, we sent a warning by email
+            //
+            // we can't reset a password necessary to access the CP
+            //
+            if ( !get_bool_from_string($member->can_access_cp) )
+            {
+                // create new reset code
+                $reset_code = strtolower(ee()->functions->random('alnum', 12));
+
+                ee()->db->insert('reset_password', array(
+                        'member_id' => $member->member_id,
+                        'resetcode' => $reset_code,
+                        'date' => ee()->localize->now,
+                    ));
+
+                // let's create the token link
+                if ( $token_url = $this->form_param('login_url') )
+                {
+                    $token_url = ee()->functions->create_url($token_url).QUERY_MARKER;
+                }
+                else
+                {
+                    // if there isn't a `login_url` parameter, the link will point to an ACT url
+                    $token_url = ee()->functions->fetch_site_index().QUERY_MARKER.'ACT='.ee()->functions->fetch_action_id('Freemember', 'act_passwordless_login').'&';
+                }
+
+                $token_url.= 'token='.$reset_code;
+
+                // if csrf protection is enabled, the link only works on the
+                // same device and browser used to request for it
+                if ( ! bool_config_item('disable_csrf_protection') )
+                {
+                    // we're using `XID` as the variable name to keep
+                    // it different of `token`
+                    $token_url.= '&XID='.CSRF_TOKEN;
+                }
+
+                $email_vars[0]['reset_url'] = ee()->functions->insert_action_ids($token_url);
+                $email_vars[0]['ttl'] = $pwls_ttl/60; // ttl converted from seconds to minutes
+
+                $email_message = lang('pwls_email_message');
+            }
+            else
+            {
+                // the user should login by the CP
+                $email_message = lang('pwls_cp_user_message');
+            }
+
+            $email_vars[0]['name'] = $member->username;
+            $email_vars[0]['site_name'] = stripslashes(ee()->config->item('site_name'));
+            $email_vars[0]['site_url'] = ee()->config->item('site_url');
+            $email_vars[0]['webmaster_email'] = ee()->config->item('webmaster_email');
+
+            // send magic link email
+            ee()->load->library(array('email', 'template'));
+            ee()->load->helper('text');
+            ee()->email->wordwrap = true;
+            ee()->email->from(ee()->config->item('webmaster_email'), ee()->config->item('webmaster_name'));
+            ee()->email->to($member->email);
+            ee()->email->subject(stripslashes(ee()->config->item('site_name')).' - '.lang('pwls_email_subject'));
+            ee()->email->message(entities_to_ascii($str = ee()->template->parse_variables($email_message, $email_vars)));
+
+            if ( ! ee()->email->send() )
+            {
+                ee()->load->library('logger');
+
+                ee()->logger->developer('freemember:passwordless_form -> Error on sending email.',TRUE,604800);
+
+                return array('password' => lang('pwls_report_error'));
+            }
+
+            if ( $return_url = $this->form_param("group_id_{$member->group_id}_return") )
+            {
+                $_POST['return_url'] = $return_url;
+            }
+        }
+
+        // We need to keep the `remember_me` and `return_url`
+        // even for the fake users, to avoid inform them if a
+        // member is registered or not
+        $cookie_data = array(
+                'remember_me' => ee()->input->post('auto_login', TRUE),
+                'return_url' =>  ee()->input->post('return_url', TRUE)
+            );
+
+        ee()->input->set_cookie('passwordless_login', json_encode($cookie_data), $pwls_ttl);
+
+        // changing the return_url and passing it to the next function
+        if ($return_url = $this->form_param("message_url"))
+        {
+            // if `EMAIL` is present, let's replace it by the actual posted email
+            if ( strpos($return_url, '/EMAIL') !== FALSE )
+            {
+                $_POST['return_url'] = str_replace('/EMAIL', '/'. urlencode($email) , $return_url);
+            }
+        }
+        else
+        {
+            $message_data = array(
+                    'title'   => lang('pwls_title'),
+                    'heading' => lang('pwls_title'),
+                    'content' => lang('pwls_message'),
+                    'link'    => array(ee()->functions->form_backtrack('-2'), lang('return_to_entry'))
+                );
+
+            ee()->output->show_message($message_data);
+        }
+
+    }
+
+    public function passwordless_login()
+    {
+
+        $pwls_params = json_decode(ee()->input->cookie('passwordless_login', TRUE), TRUE);
+
+        $pwls_ttl = ctype_digit(ee()->config->item('passwordless_ttl'))
+                ? ee()->config->item('passwordless_ttl')
+                : ee()->session->user_session_len;
+
+        // If they are already logged in then send them away.
+        if (ee()->session->userdata('member_id') !== 0)
+        {
+            return ee()->functions->redirect(ee()->functions->fetch_site_index());
+        }
+
+        $token = ee()->input->get('token', TRUE);
+
+        if ( strlen($token) !== 12 OR !ctype_alnum($token) )
+        {
+            return array('error' => lang('pwls_link_invalid'));
+        }
+
+        if ( ! bool_config_item('disable_csrf_protection') )
+        {
+            // Check CSRF Token
+            $csrf_token = FALSE;
+            if ( ! $csrf_token) $csrf_token = ee()->input->get('csrf_token',TRUE);
+            if ( ! $csrf_token) $csrf_token = ee()->input->get('XID',TRUE);
+
+            if ($csrf_token != CSRF_TOKEN)
+            {
+                return array('error' => lang('pwls_link_invalid'));
+            }
+        }
+
+        // verify reset code
+        $member = ee()->freemember_model->find_member_by_reset_code($token, $pwls_ttl);
+
+        if ( empty($member) )
+        {
+            return array('error' => lang('pwls_token_expired'));
+        }
+
+        // check for pending members
+        if ( 4 == $member->group_id AND !bool_config_item('allow_pending_login') )
+        {
+            return array('error' => lang('mbr_account_not_active'));
+        }
+
+        // expire reset code
+        ee()->freemember_model->clean_password_reset_codes($member->member_id);
+
+        ee()->load->library('auth');
+
+        // we can't authenticate without a password
+        // so, let's create a new one
+        $new_password = $this->_generate_random_password();
+        ee()->freemember_model->update_member($member->member_id, array('password' => $new_password));
+
+        $sess = ee()->auth->authenticate_id($member->member_id, $new_password);
+
+        if (! $sess)
+        {
+            ee()->session->save_password_lockout($member->email);
+
+            ee()->load->library('logger');
+            ee()->logger->developer('freemember:passwordless_form -> The random password created at every passwordless login couldn\'t be created.',TRUE,604800);
+
+            return array('error' => lang('pwls_report_error'));
+        }
+
+        if ( !empty($pwls_params['return_url']) )
+        {
+            $_POST['return_url'] = $pwls_params['return_url'];
+        }
+
+        // Banned
+        if ($sess->is_banned())
+        {
+            return array('error' => lang('not_authorized'));
+        }
+
+        // Allow multiple logins?
+        // Do we allow multiple logins on the same account?
+        if ( !bool_config_item('allow_multi_logins') AND $sess->has_other_session() )
+        {
+            return array('error' => lang('not_authorized'));
+        }
+
+        // Start Session
+        // "Remember Me" is one year
+        if ( ! empty($pwls_params['remember_me']))
+        {
+            $sess->remember_me(TRUE);
+        }
+
+        $sess->start_session();
+
+        ee()->freemember_model->update_online_user_stats();
+    }
+
+    /**
+     * get all devices of the current user
+     * @param  array $params parameters to the query
+     * @return array         variables to be parsed by the template class: device_id, ip_address, user_agent, expiration, last_refresh, logout_url, platform, browser, version
+     */
+    public function devices($params)
+    {
+        $variables_data = array();
+
+        $results = ee()->db->select('remember_me_id device_id, ip_address, user_agent, expiration, last_refresh')
+            ->from('remember_me')
+            ->where('member_id', ee()->session->userdata('member_id'))
+            ->where('site_id', ee()->config->item('site_id'))
+            ->order_by($params['orderby'], $params['sort'])
+            ->get();
+
+        if ($results->num_rows() > 0)
+        {
+            $logout_url = ee()->functions->fetch_site_index().QUERY_MARKER.
+            'ACT='.ee()->functions->fetch_action_id('Freemember', 'act_logout_device');
+
+            if ( ! bool_config_item('disable_csrf_protection') )
+            {
+                $logout_url.= '&XID={csrf_token}';
+            }
+
+            $logout_url.= '&device=';
+
+            foreach($results->result_array() as $row)
+            {
+
+                if ($current = (ee()->input->cookie('remember', TRUE) == $row['device_id']) ? TRUE : FALSE)
+                {
+                    $logout_var = array('logout_url'=> '');
+                }
+                else
+                {
+                    $logout_var = array('logout_url'=> $logout_url.$row['device_id']);
+                }
+
+                // because we can't rely on PHP get_browser() due to its low availability
+                // and performance issues, we're using the PhpUserAgent, which is enough to
+                // inform non-tech users about their devices
+                //
+                // https://github.com/donatj/PhpUserAgent
+                // http://donatstudios.com/PHP-Parser-HTTP_USER_AGENT
+                $variables_data[] = array_merge(
+                    $row,
+                    $logout_var,
+                    parse_user_agent($row['user_agent']),
+                    array('current'=> $current)
+                );
+            }
+        }
+
+        return $variables_data;
+    }
+    public function total_devices()
+    {
+        $results = ee()->db->select('COUNT(*) total')
+            ->where('member_id', ee()->session->userdata('member_id'))
+            ->where('site_id', ee()->config->item('site_id'))
+            ->get('remember_me');
+
+        return $results->row('total');
+    }
+    /**
+     * logout an specific device of the current user
+     *
+     */
+    public function logout_device()
+    {
+        // Check CSRF Token
+        if ( ! bool_config_item('disable_csrf_protection'))
+        {
+            $token = FALSE;
+            if ( ! $token) $token = ee()->input->get('csrf_token', TRUE);
+            if ( ! $token) $token = ee()->input->get('XID', TRUE);
+
+            if ($token != CSRF_TOKEN)
+            {
+                return ee()->output->show_user_error('general', array(lang('not_authorized')));
+            }
+
+        }
+
+        $device = ee()->input->get('device', TRUE);
+
+        if ( !ctype_alnum($device) )
+        {
+            return array('error' => lang('pwls_link_invalid'));
+        }
+
+        // it's necessary to delete the sessions and the security hashes, besides the remember_me data
+        //
+        // using the `session_id` the get them
+        $results = ee()->db->select('session_id')
+                           ->from('remember_me rm')
+                           ->join('sessions s', 'rm.ip_address = s.ip_address AND rm.user_agent = s.user_agent AND rm.member_id = s.member_id')
+                           ->where('rm.remember_me_id', $device)
+                           ->where('s.site_id', ee()->config->item('site_id'))
+                           ->where('rm.member_id', ee()->session->userdata('member_id'))
+                           ->get();
+
+        // deleting remember_me_ids
+        ee()->db->where('member_id', ee()->session->userdata('member_id'))
+                ->where('remember_me_id', $device)
+                ->delete('remember_me');
+
+        // deleting sessions and security hashes
+        if ($results->num_rows() > 0)
+        {
+            foreach($results->result_array() as $row)
+            {
+                ee()->db->or_where('session_id', $row['session_id']);
+            }
+
+            ee()->db->delete(array('sessions', 'security_hashes'));
+        }
+    }
+
+    /**
+     * generates a random password
+     * 40 characters is the maximum allowed on CP edition form
+     * @return string
+     * @see https://gist.github.com/zyphlar/7217f566fc83a9633959
+     */
+    protected function _generate_random_password($length = 40)
+    {
+        return substr(preg_replace("/[^a-zA-Z0-9]/", "", base64_encode($this->_getRandomBytes($length+1,TRUE))),0,$length);
+    }
+    protected function _getRandomBytes($nbBytes = 32)
+    {
+        $bytes = openssl_random_pseudo_bytes($nbBytes, $strong);
+        if (false !== $bytes && true === $strong) {
+            return $bytes;
+        }
+        else {
+            return ee()->functions->random('alnum', $nbBytes);
+        }
     }
 }

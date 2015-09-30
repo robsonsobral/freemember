@@ -32,6 +32,8 @@ class Freemember
     private static $update_profile_errors;
     private static $forgot_password_errors;
     private static $reset_password_errors;
+    private static $passwordless_form_errors;
+    private static $passwordless_login_errors;
 
     protected $tag_vars;
 
@@ -161,6 +163,136 @@ class Freemember
     {
         self::$forgot_password_errors = ee()->freemember->forgot_password();
         $this->_action_complete(self::$forgot_password_errors);
+    }
+
+    /**
+     * Passwordless form
+     */
+    public function passwordless_form()
+    {
+        if ( !bool_config_item('allow_passwordless') ) {
+            ee()->load->library('logger');
+
+            ee()->logger->developer('freemember:passwordless_form -> Please, before to use passwordless login, enable it by adding `$config[\'allow_passwordless\'] = \'y\';` to your `config.php` file.');
+            return;
+        }
+
+        $this->tag_vars = array();
+
+        $this->_add_field('email', 'email');
+        $this->_add_field('auto_login', 'checkbox');
+
+        // let's use the same errors as login
+        // inline errors
+        $this->_add_errors(self::$passwordless_form_errors);
+
+        return $this->_build_form('act_passwordless_form');
+    }
+
+    /**
+     * Passwordless Login form action
+     */
+    public function act_passwordless_form()
+    {
+        self::$passwordless_form_errors = ee()->freemember->passwordless_form();
+        $this->_action_complete(self::$passwordless_form_errors);
+    }
+
+
+    /**
+     * Passwordless Login tag
+     *
+     * because, maybe we want to override the message screen
+     */
+    public function passwordless_login()
+    {
+        self::$passwordless_login_errors = ee()->freemember->passwordless_login();
+
+        if ( !empty(self::$passwordless_login_errors) )
+        {
+            if ( isset(ee()->TMPL) ){
+                $error_handling = ee()->TMPL->fetch_param('error_handling');
+                if ( $error_handling === 'inline' ){
+                    $this->tag_vars[0] = self::$passwordless_login_errors;
+
+                    return ee()->TMPL->parse_variables(ee()->TMPL->tagdata, $this->tag_vars);
+                }
+            }
+
+            return ee()->output->show_user_error(false, self::$passwordless_login_errors);
+        }
+
+        $this->_redirect_return();
+    }
+
+    /**
+     * Passwordless Login action
+     */
+    public function act_passwordless_login()
+    {
+        $this->passwordless_login();
+    }
+
+    /**
+     * Devices list and data
+     */
+    public function devices()
+    {
+        if (ee()->session->userdata('member_id') === 0)
+        {
+            return ee()->TMPL->no_results();
+        }
+
+        $valid_sort = array('ASC', 'DESC');
+        $params['sort'] = (in_array($sort = strtoupper(ee()->TMPL->fetch_param('sort')), $valid_sort)) ? $sort : 'DESC';
+
+        $valid_orderby = array('expiration', 'last_refresh');
+        $params['orderby'] = (in_array($orderby = ee()->TMPL->fetch_param('orderby'), $valid_orderby)) ? $orderby : 'last_refresh';
+
+        $variables_data = array();
+
+        $variables_data = ee()->freemember->devices($params);
+
+        if (empty($variables_data))
+        {
+            return ee()->TMPL->no_results();
+        }
+
+        return ee()->TMPL->parse_variables(ee()->TMPL->tagdata, $variables_data);
+    }
+    public function total_devices()
+    {
+        if (ee()->session->userdata('member_id') == 0)
+        {
+            return ee()->TMPL->no_results();
+        }
+
+        $total = ee()->freemember->total_devices();
+
+        if ( get_bool_from_string(ee()->TMPL->fetch_param('ignore_current', 'no')) )
+        {
+            $total--;
+        }
+
+        if ($total < 1)
+        {
+            return ee()->TMPL->no_results();
+        }
+
+        return ee()->TMPL->parse_variables(ee()->TMPL->tagdata, array(array('total'=> $total)));
+    }
+    /**
+     * terminate session action
+     */
+    public function act_logout_device()
+    {
+
+       if ( $error = ee()->freemember->logout_device() )
+        {
+            return ee()->output->show_user_error(false, $error);
+        }
+
+        $this->_redirect_return();
     }
 
     public function reset_password()

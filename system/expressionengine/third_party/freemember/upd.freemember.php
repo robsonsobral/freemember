@@ -46,12 +46,23 @@ class Freemember_upd
         $this->_register_action('act_update_profile');
         $this->_register_action('act_forgot_password');
         $this->_register_action('act_reset_password');
+        $this->_register_action('act_passwordless_form');
+        $this->_register_action('act_passwordless_login');
+        $this->_register_action('act_logout_device');
 
         return true;
     }
 
     public function update($current = '')
     {
+        // Update to 2.4
+        if (version_compare($current, '2.4', '<'))
+        {
+            $this->_register_action('act_passwordless_form');
+            $this->_register_action('act_passwordless_login');
+            $this->_register_action('act_logout_device');
+        }
+
         return true;
     }
 
