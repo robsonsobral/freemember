@@ -126,7 +126,12 @@ class Freemember_model extends CI_Model
 
     public function find_member_by_email($email)
     {
-        return ee()->db->where('email', $email)->get('members')->row();
+        // the group data is necessary on passwordless form
+        return ee()->db->select()
+                ->from('members')
+                ->join('member_groups mg','members.group_id = mg.group_id')
+                ->where('email', $email)
+                ->get()->row();
     }
 
     /**
