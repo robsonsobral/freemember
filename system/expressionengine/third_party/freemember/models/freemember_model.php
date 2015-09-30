@@ -258,13 +258,13 @@ class Freemember_model extends CI_Model
                      ->delete('online_users');
 
         $data = array(
-                        'member_id'		=> ee()->session->userdata('member_id'),
-                        'name'			=> (ee()->session->userdata('screen_name') == '') ? ee()->session->userdata('username') : ee()->session->userdata('screen_name'),
-                        'ip_address'	=> ee()->input->ip_address(),
-                        'in_forum'		=> $in_forum,
-                        'date'			=> ee()->localize->now,
-                        'anon'			=> $anon,
-                        'site_id'		=> ee()->config->item('site_id')
+                        'member_id'     => ee()->session->userdata('member_id'),
+                        'name'          => (ee()->session->userdata('screen_name') == '') ? ee()->session->userdata('username') : ee()->session->userdata('screen_name'),
+                        'ip_address'    => ee()->input->ip_address(),
+                        'in_forum'      => $in_forum,
+                        'date'          => ee()->localize->now,
+                        'anon'          => $anon,
+                        'site_id'       => ee()->config->item('site_id')
                     );
 
         ee()->db->where('ip_address', ee()->input->ip_address())
