@@ -200,6 +200,12 @@ class Freemember_lib
 
         ee()->freemember_model->update_member($member_id, $member_data);
         ee()->freemember_model->update_member_custom($member_id, $member_data);
+
+        // if `EMAIL` is present, let's replace it by the actual posted email
+        if ( !empty($_POST['return_url']) && strpos($_POST['return_url'], '/EMAIL') !== FALSE )
+        {
+            $_POST['return_url'] = str_replace('/EMAIL', '/'. urlencode($_POST['email']), $_POST['return_url']);
+        }
     }
 
     public function update_profile()
