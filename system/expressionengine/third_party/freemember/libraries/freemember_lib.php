@@ -171,10 +171,28 @@ class Freemember_lib
             return $errors;
         }
 
+        // in case of e-mail auto activation,
+        // we can use the passwordless mail for it
+        $pwls_activation = ( bool_config_item('allow_passwordless') && ee()->config->item('req_mbr_activation') === 'email')
+                            ? TRUE
+                            : FALSE;
+
+        // if pwls activation, the config needs to be set as `manual`
+        // to avoid imediate login and the default activation mail
+        if ($pwls_activation)
+        {
+            ee()->config->set_item('req_mbr_activation','manual');
+        }
         // let EE take over
         $this->mock_output();
         $this->load_member_class('member_register')->register_member();
         $this->unmock_output();
+
+        // putting back the config variable
+        if ($pwls_activation)
+        {
+            ee()->config->set_item('req_mbr_activation','email');
+        }
 
         // get new member id
         $member_id = ee()->db->select('member_id')
@@ -198,6 +216,27 @@ class Freemember_lib
                 $member_data['group_id'] = (int)$_POST['group_id'];
             } elseif (count($group_ids) > 0) {
                 $member_data['group_id'] = reset($group_ids);
+            }
+        }
+        // let's send the passwordless email
+        // and set the user activation as pending
+        elseif ($pwls_activation)
+        {
+            $member_data['group_id'] = 4;
+
+            $member = (object) array(
+                'can_access_cp' => 'n',
+                'member_id'     => $member_id,
+                'username'      => $_POST['username'],
+                'email'         => $_POST['email'],
+            );
+
+            if ( ! $this->_send_pwls_mail($member) )
+            {
+                ee()->load->library('logger');
+
+                ee()->logger->developer('freemember:passwordless_form -> Error on sending email.',TRUE,604800);
+                return ee()->output->show_user_error('general', array(lang('pwls_report_error')));
             }
         }
 
@@ -554,6 +593,7 @@ class Freemember_lib
     public function wrap_error($message)
     {
         $delimiters = explode('|', $this->form_param('error_delimiters'), 2);
+
         if (2 == count($delimiters)) {
             return $delimiters[0].$message.$delimiters[1];
         }
@@ -660,14 +700,6 @@ class Freemember_lib
             return array('email' => lang('unauthorized_request'));
         }
 
-        // if $config['passwordless_ttl'] isn't set, the cookie will
-        // last the same time as does the session: 7200s
-        //
-        // Note that ctype_digit(), will return TRUE on an empty string in pre-5.1.0 versions of PHP.
-        $pwls_ttl = ctype_digit(ee()->config->item('passwordless_ttl'))
-                ? ee()->config->item('passwordless_ttl')
-                : ee()->session->user_session_len;
-
         // Check password lockout status
         if (true === ee()->session->check_password_lockout($email))
         {
@@ -687,79 +719,13 @@ class Freemember_lib
             // clean old password reset codes
             ee()->freemember_model->clean_password_reset_codes($member->member_id);
 
-            $email_vars = array();
-            $email_message = '';
-
-            // check if the user is member of group which can access the CP
-            // if so, we sent a warning by email
-            //
-            // we can't reset a password necessary to access the CP
-            //
-            if ( !get_bool_from_string($member->can_access_cp) )
-            {
-                // create new reset code
-                $reset_code = strtolower(ee()->functions->random('alnum', 12));
-
-                ee()->db->insert('reset_password', array(
-                        'member_id' => $member->member_id,
-                        'resetcode' => $reset_code,
-                        'date' => ee()->localize->now,
-                    ));
-
-                // let's create the token link
-                if ( $token_url = $this->form_param('login_url') )
-                {
-                    $token_url = ee()->functions->create_url($token_url).QUERY_MARKER;
-                }
-                else
-                {
-                    // if there isn't a `login_url` parameter, the link will point to an ACT url
-                    $token_url = ee()->functions->fetch_site_index().QUERY_MARKER.'ACT='.ee()->functions->fetch_action_id('Freemember', 'act_passwordless_login').'&';
-                }
-
-                $token_url.= 'token='.$reset_code;
-
-                // if csrf protection is enabled, the link only works on the
-                // same device and browser used to request for it
-                if ( ! bool_config_item('disable_csrf_protection') )
-                {
-                    // we're using `XID` as the variable name to keep
-                    // it different of `token`
-                    $token_url.= '&XID='.CSRF_TOKEN;
-                }
-
-                $email_vars[0]['reset_url'] = ee()->functions->insert_action_ids($token_url);
-                $email_vars[0]['ttl'] = $pwls_ttl/60; // ttl converted from seconds to minutes
-
-                $email_message = lang('pwls_email_message');
-            }
-            else
-            {
-                // the user should login by the CP
-                $email_message = lang('pwls_cp_user_message');
-            }
-
-            $email_vars[0]['name'] = $member->username;
-            $email_vars[0]['site_name'] = stripslashes(ee()->config->item('site_name'));
-            $email_vars[0]['site_url'] = ee()->config->item('site_url');
-            $email_vars[0]['webmaster_email'] = ee()->config->item('webmaster_email');
-
-            // send magic link email
-            ee()->load->library(array('email', 'template'));
-            ee()->load->helper('text');
-            ee()->email->wordwrap = true;
-            ee()->email->from(ee()->config->item('webmaster_email'), ee()->config->item('webmaster_name'));
-            ee()->email->to($member->email);
-            ee()->email->subject(stripslashes(ee()->config->item('site_name')).' - '.lang('pwls_email_subject'));
-            ee()->email->message(entities_to_ascii($str = ee()->template->parse_variables($email_message, $email_vars)));
-
-            if ( ! ee()->email->send() )
+            if ( ! $this->_send_pwls_mail($member) )
             {
                 ee()->load->library('logger');
 
                 ee()->logger->developer('freemember:passwordless_form -> Error on sending email.',TRUE,604800);
 
-                return array('password' => lang('pwls_report_error'));
+                return ee()->output->show_user_error('general', array(lang('pwls_report_error')));
             }
 
             if ( $return_url = $this->form_param("group_id_{$member->group_id}_return") )
@@ -776,7 +742,7 @@ class Freemember_lib
                 'return_url' =>  ee()->input->post('return_url', TRUE)
             );
 
-        ee()->input->set_cookie('passwordless_login', json_encode($cookie_data), $pwls_ttl);
+        ee()->input->set_cookie('passwordless_login', json_encode($cookie_data), $this->_pwls_ttl());
 
         // changing the return_url and passing it to the next function
         if ($return_url = $this->form_param("message_url"))
@@ -806,10 +772,6 @@ class Freemember_lib
 
         $pwls_params = json_decode(ee()->input->cookie('passwordless_login', TRUE), TRUE);
 
-        $pwls_ttl = ctype_digit(ee()->config->item('passwordless_ttl'))
-                ? ee()->config->item('passwordless_ttl')
-                : ee()->session->user_session_len;
-
         // If they are already logged in then send them away.
         if (ee()->session->userdata('member_id') !== 0)
         {
@@ -837,17 +799,27 @@ class Freemember_lib
         }
 
         // verify reset code
-        $member = ee()->freemember_model->find_member_by_reset_code($token, $pwls_ttl);
+        $member = ee()->freemember_model->find_member_by_reset_code($token, $this->_pwls_ttl());
 
         if ( empty($member) )
         {
             return array('error' => lang('pwls_token_expired'));
         }
 
+        $new_group = array();
         // check for pending members
-        if ( 4 == $member->group_id AND !bool_config_item('allow_pending_login') )
+        if ( 4 == $member->group_id)
         {
-            return array('error' => lang('mbr_account_not_active'));
+            if ( !bool_config_item('allow_pending_login') && ee()->config->item('req_mbr_activation') !== 'email' )
+            {
+                return array('error' => lang('mbr_account_not_active'));
+            }
+            // a passwordless login **is** also an activation
+            elseif( ee()->config->item('req_mbr_activation') === 'email' )
+            {
+                ee()->stats->update_member_stats();
+                $new_group = array('group_id' => ee()->config->item('default_member_group'));
+            }
         }
 
         // expire reset code
@@ -858,7 +830,10 @@ class Freemember_lib
         // we can't authenticate without a password
         // so, let's create a new one
         $new_password = $this->_generate_random_password();
-        ee()->freemember_model->update_member($member->member_id, array('password' => $new_password));
+        ee()->freemember_model->update_member(
+            $member->member_id,
+            array_merge(array('password' => $new_password),$new_group)
+        );
 
         $sess = ee()->auth->authenticate_id($member->member_id, $new_password);
 
@@ -1022,6 +997,91 @@ class Freemember_lib
             ee()->db->delete(array('sessions', 'security_hashes'));
         }
     }
+
+    protected function _pwls_ttl()
+    {
+        // if $config['passwordless_ttl'] isn't set, the ttl will
+        // last the same time as does the session: 7200s
+        //
+        // Note that ctype_digit(), will return TRUE on an empty string in pre-5.1.0 versions of PHP.
+
+        return ctype_digit(ee()->config->item('passwordless_ttl'))
+                ? ee()->config->item('passwordless_ttl')
+                : ee()->session->user_session_len;
+    }
+
+
+    protected function _send_pwls_mail($member)
+    {
+        $email_vars = array();
+        $email_message = '';
+
+        // check if the user is member of group which can access the CP
+        // if so, we sent a warning by email
+        //
+        // we can't reset a password necessary to access the CP
+        //
+        if ( !get_bool_from_string($member->can_access_cp) )
+        {
+            // create new reset code
+            $reset_code = strtolower(ee()->functions->random('alnum', 12));
+
+            ee()->db->insert('reset_password', array(
+                    'member_id' => $member->member_id,
+                    'resetcode' => $reset_code,
+                    'date' => ee()->localize->now,
+                ));
+
+            // let's create the token link
+            if ( $token_url = $this->form_param('login_url') )
+            {
+                $token_url = ee()->functions->create_url($token_url).QUERY_MARKER;
+            }
+            else
+            {
+                // if there isn't a `login_url` parameter, the link will point to an ACT url
+                $token_url = ee()->functions->fetch_site_index().QUERY_MARKER.'ACT='.ee()->functions->fetch_action_id('Freemember', 'act_passwordless_login').'&';
+            }
+
+            $token_url.= 'token='.$reset_code;
+
+            // if csrf protection is enabled, the link only works on the
+            // same device and browser used to request for it
+            if ( ! bool_config_item('disable_csrf_protection') )
+            {
+                // we're using `XID` as the variable name to keep
+                // it different of `token`
+                $token_url.= '&XID='.CSRF_TOKEN;
+            }
+
+            $email_vars[0]['reset_url'] = ee()->functions->insert_action_ids($token_url);
+            $email_vars[0]['ttl'] = $this->_pwls_ttl()/60; // ttl converted from seconds to minutes
+
+            $email_message = lang('pwls_email_message');
+        }
+        else
+        {
+            // the user should login by the CP
+            $email_message = lang('pwls_cp_user_message');
+        }
+
+        $email_vars[0]['name'] = $member->username;
+        $email_vars[0]['site_name'] = stripslashes(ee()->config->item('site_name'));
+        $email_vars[0]['site_url'] = ee()->config->item('site_url');
+        $email_vars[0]['webmaster_email'] = ee()->config->item('webmaster_email');
+
+        // send magic link email
+        ee()->load->library(array('email', 'template'));
+        ee()->load->helper('text');
+        ee()->email->wordwrap = true;
+        ee()->email->from(ee()->config->item('webmaster_email'), ee()->config->item('webmaster_name'));
+        ee()->email->to($member->email);
+        ee()->email->subject(stripslashes(ee()->config->item('site_name')).' - '.lang('pwls_email_subject'));
+        ee()->email->message(entities_to_ascii($str = ee()->template->parse_variables($email_message, $email_vars)));
+
+        return ee()->email->send();
+    }
+
 
     /**
      * generates a random password
