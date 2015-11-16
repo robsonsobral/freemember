@@ -785,7 +785,7 @@ class Freemember_lib
             return array('error' => lang('pwls_link_invalid'));
         }
 
-        if ( ! bool_config_item('disable_csrf_protection') )
+        if ( ! bool_config_item('disable_csrf_protection') AND ! bool_config_item('no_pwls_csrf_protection') )
         {
             // Check CSRF Token
             $csrf_token = FALSE;
@@ -1047,7 +1047,7 @@ class Freemember_lib
 
             // if csrf protection is enabled, the link only works on the
             // same device and browser used to request for it
-            if ( ! bool_config_item('disable_csrf_protection') )
+            if ( ! bool_config_item('disable_csrf_protection') AND ! bool_config_item('no_pwls_csrf_protection') )
             {
                 // we're using `XID` as the variable name to keep
                 // it different of `token`
