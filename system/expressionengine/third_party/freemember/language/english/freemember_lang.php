@@ -17,7 +17,7 @@ $lang = array(
 
 Click and confirm that you want to sign in to {site_name}.
 
-This link will expire in {ttl} minutes and can only be used once.
+This link will expire in {ttl} minutes and can only be used once. You can request another one, if you need so.
 
 {unwrap}{reset_url}{/unwrap}
 
